@@ -1,0 +1,2 @@
+#define SWAP_MAX_PAGES 1024
+#define SWAP_BLOCK_SIZE 512
