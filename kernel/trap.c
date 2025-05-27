@@ -57,8 +57,11 @@ usertrap(void)
 
     if(pte && (*pte & PTE_SWAPPED)) {
       printf("usertrap: page fault on swapped va %p\n", (void*)va);
-      // TODO: Add swapin() here later
-      p->killed = 1;
+      if(swapin(p, PGROUNDDOWN(va)) < 0) {
+        printf("usertrap: swapin failed\n");
+        p->killed = 1;
+      }
+      return;
     }
   }
   // --- END PAGE FAULT HANDLER ---

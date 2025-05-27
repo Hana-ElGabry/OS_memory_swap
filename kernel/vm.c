@@ -79,10 +79,13 @@ int swapin(struct proc *p, uint64 va) {
 }
 //-------------------------------------------------
 int swapout(struct proc *p, uint64 va) {
-  acquire(&swapdev.lock);
-  
-  // 1. Find a free swap slot
   int slot = -1;
+  struct buf *b;
+  uint64 pa;
+  pte_t *pte;
+  
+  acquire(&swapdev.lock);
+  // Find a free swap slot
   for (int i = 0; i < swapdev.block_count; i++) {
     if ((swapdev.bitmap[i/8] & (1 << (i%8))) == 0) {
       slot = i;
@@ -94,56 +97,73 @@ int swapout(struct proc *p, uint64 va) {
     release(&swapdev.lock);
     return -1;  // No swap space left
   }
+  release(&swapdev.lock);  // Release lock while doing I/O
 
-  // 2. Get the physical page
-  pte_t *pte = walk(p->pagetable, va, 0);
+  // Get the physical page
+  pte = walk(p->pagetable, va, 0);
   if (!pte || !(*pte & PTE_V)) {
+    acquire(&swapdev.lock);
+    swapdev.bitmap[slot/8] &= ~(1 << (slot%8));  // Free the slot
     release(&swapdev.lock);
     return -1;  // Invalid VA or page not present
   }
-  uint64 pa = PTE2PA(*pte);
+  pa = PTE2PA(*pte);
 
-  // 3. Write to disk (using xv6's `virtio_disk_rw`)
-  struct buf *b = bread(0, swapdev.block_start + slot);  // 0 = dev
+  // Write to disk
+  b = bread(0, swapdev.block_start + slot);
   memmove(b->data, (char*)pa, PGSIZE);
   bwrite(b);
   brelse(b);
 
-  // 4. Update PTE to mark as swapped
+  // Update PTE to mark as swapped
   *pte = (*pte & ~PTE_V) | PTE_SWAPPED | (slot << 10);
-  sfence_vma();  // <<< ADD THIS
+  sfence_vma();
   
-  release(&swapdev.lock);
   return 0;
 }
 //---------------------------------------------------------------------------------------
 
-// Selects a page to evict using Clock Algorithm
 // Select victim using Clock Algorithm
 uint64 select_victim(struct proc *p) {
-  static uint clock_hand = 0;
+  static uint64 clock_hand = 0;
   pte_t *pte;
   uint64 max_va = PGROUNDUP(p->sz);
 
-  for (int i = 0; i < 512; i++) {
+  // Start from where we left off last time
+  if(clock_hand >= max_va) {
+    clock_hand = 0;
+  }
+
+  // First pass: look for pages with access bit clear
+  uint64 start_va = clock_hand;
+  do {
     pte = walk(p->pagetable, clock_hand, 0);
-    if (pte && (*pte & PTE_V)) {
-      // DEBUG: Print PTE and Accessed bit status
-      printf("select_victim: VA 0x%x PTE %p A=%d\n", 
-             clock_hand, pte, (*pte & PTE_A) ? 1 : 0);
-            
-      if (*pte & PTE_A) {
-        *pte &= ~PTE_A;
-        sfence_vma();
-      } else {
+    if(pte && (*pte & PTE_V) && (*pte & PTE_U)) {  // Valid user page
+      if(!(*pte & PTE_A)) {  // Access bit is clear
         uint64 victim = clock_hand;
         clock_hand = (clock_hand + PGSIZE) % max_va;
         return victim;
       }
+      // Clear access bit for next round
+      *pte &= ~PTE_A;
+      sfence_vma();
     }
     clock_hand = (clock_hand + PGSIZE) % max_va;
+  } while(clock_hand != start_va);
+
+  // Second pass: take the first valid user page
+  clock_hand = 0;
+  while(clock_hand < max_va) {
+    pte = walk(p->pagetable, clock_hand, 0);
+    if(pte && (*pte & PTE_V) && (*pte & PTE_U)) {  // Valid user page
+      uint64 victim = clock_hand;
+      clock_hand = (clock_hand + PGSIZE) % max_va;
+      return victim;
+    }
+    clock_hand += PGSIZE;
   }
-  panic("select_victim: no victim found");
+
+  return 0;  // No victim found
 }
 
 

@@ -26,7 +26,7 @@ struct {
 void kinit()
 {
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)(end + 1 * 1024 * 1024)); // Only 1MB physical memory
+  freerange(end, (void*)(end + 2 * 1024 * 1024)); // Allocate 2MB physical memory
 }
 
 
@@ -80,22 +80,26 @@ void* kalloc() {
   if(!r) {
     release(&kmem.lock);
     printf("kalloc: attempting swapout...\n");
-    // NEW CODE: USE CLOCK ALGORITHM TO SELECT VICTIM
-    uint64 victim_va = select_victim(myproc());
-    if(swapout(myproc(), victim_va) == 0) {
-      printf("Evicted va %p\n", (void*)victim_va);  // DEBUG
-      return kalloc();  // Retry allocation after swap
+    struct proc *p = myproc();
+    if(p == 0) {
+      panic("kalloc: no process");
     }
-    panic("kalloc: out of memory");
+    uint64 victim_va = select_victim(p);
+    if(victim_va == 0) {
+      printf("kalloc: no victim found\n");
+      return 0;  // Return null instead of panic
+    }
+    if(swapout(p, victim_va) < 0) {
+      printf("kalloc: swapout failed\n");
+      return 0;  // Return null instead of panic
+    }
+    printf("Evicted va %p\n", (void*)victim_va);
+    return kalloc();  // Retry allocation after swap
   }
 
-  // If a free page was found, remove it from freelist
   kmem.freelist = r->next;
   release(&kmem.lock);
-
-  // Initialize the page with junk data to catch bugs
   memset((char*)r, 5, PGSIZE);
-
   return (void*)r;
 }
 

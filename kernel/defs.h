@@ -157,6 +157,7 @@ int             uartgetc(void);
 
 // vm.c
 void            swapinit(void);
+int             swapin(struct proc*, uint64);
 int             swapout(struct proc*, uint64);
 uint64          select_victim(struct proc*);
 void            kvminit(void);
